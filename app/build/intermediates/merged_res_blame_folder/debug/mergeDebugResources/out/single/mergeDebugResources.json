@@ -1,0 +1,22 @@
+[
+    {
+        "merged": "dev.matejgroombridge.turntable.app-debug-56:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "dev.matejgroombridge.turntable.app-main-58:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    },
+    {
+        "merged": "dev.matejgroombridge.turntable.app-debug-56:/xml_backup_rules.xml.flat",
+        "source": "dev.matejgroombridge.turntable.app-main-58:/xml/backup_rules.xml"
+    },
+    {
+        "merged": "dev.matejgroombridge.turntable.app-debug-56:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "dev.matejgroombridge.turntable.app-main-58:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "dev.matejgroombridge.turntable.app-debug-56:/drawable_ic_launcher_foreground.xml.flat",
+        "source": "dev.matejgroombridge.turntable.app-main-58:/drawable/ic_launcher_foreground.xml"
+    },
+    {
+        "merged": "dev.matejgroombridge.turntable.app-debug-56:/xml_data_extraction_rules.xml.flat",
+        "source": "dev.matejgroombridge.turntable.app-main-58:/xml/data_extraction_rules.xml"
+    }
+]

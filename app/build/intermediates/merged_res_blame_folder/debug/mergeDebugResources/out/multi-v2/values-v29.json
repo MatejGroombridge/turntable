@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "dev.matejgroombridge.turntable.app-mergeDebugResources-54:/values-v29/values-v29.xml",
+            "map": [
+                {
+                    "source": "/Users/mgroombridge/.gradle/caches/9.0.0/transforms/9fd30478bbf940be87be951aaea0ea15/transformed/core-splashscreen-1.0.1/res/values-v29/values-v29.xml",
+                    "from": {
+                        "startLines": "2,7",
+                        "startColumns": "4,4",
+                        "startOffsets": "55,374",
+                        "endLines": "6,8",
+                        "endColumns": "12,12",
+                        "endOffsets": "369,464"
+                    }
+                }
+            ]
+        }
+    ]
+}

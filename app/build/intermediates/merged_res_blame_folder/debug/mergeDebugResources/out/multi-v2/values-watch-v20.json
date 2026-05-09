@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "dev.matejgroombridge.turntable.app-mergeDebugResources-54:/values-watch-v20/values-watch-v20.xml",
+            "map": [
+                {
+                    "source": "/Users/mgroombridge/.gradle/caches/9.0.0/transforms/9fd30478bbf940be87be951aaea0ea15/transformed/core-splashscreen-1.0.1/res/values-watch-v20/values-watch-v20.xml",
+                    "from": {
+                        "startLines": "2,3,4,5,6,7,8,9",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,129,205,280,357,428,496,566",
+                        "endColumns": "73,75,74,76,70,67,69,67",
+                        "endOffsets": "124,200,275,352,423,491,561,629"
+                    }
+                }
+            ]
+        }
+    ]
+}
