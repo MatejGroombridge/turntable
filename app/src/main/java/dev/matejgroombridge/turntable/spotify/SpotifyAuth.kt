@@ -26,6 +26,10 @@ private const val SpotifyAccountsHost = "accounts.spotify.com"
 private const val SpotifyAuthorizePath = "/authorize"
 private const val SpotifyTokenUrl = "https://accounts.spotify.com/api/token"
 private const val PendingCodeVerifierKey = "pending_code_verifier"
+private const val AccessTokenKey = "access_token"
+private const val RefreshTokenKey = "refresh_token"
+private const val ExpiresAtKey = "expires_at"
+private const val ExpirySafetyWindowMillis = 60_000L
 
 private val SpotifyScopes = listOf(
     "user-library-read",
@@ -87,9 +91,58 @@ class SpotifyAuthManager(
                     },
                 ),
             )
-        }.body<SpotifyTokenResponse>().also {
+        }.body<SpotifyTokenResponse>().also { token ->
             authPreferences.edit().remove(PendingCodeVerifierKey).apply()
+            saveTokenResponse(token)
         }
+    }
+
+    suspend fun refreshSessionIfNeeded(): SpotifyStoredSession? {
+        val currentSession = getStoredSession() ?: return null
+        if (!currentSession.isExpiringSoon()) return currentSession
+        val refreshToken = currentSession.refreshToken ?: return null
+        val refreshed = httpClient.post(SpotifyTokenUrl) {
+            setBody(
+                FormDataContent(
+                    Parameters.build {
+                        append("client_id", clientId)
+                        append("grant_type", "refresh_token")
+                        append("refresh_token", refreshToken)
+                    },
+                ),
+            )
+        }.body<SpotifyTokenResponse>()
+        saveTokenResponse(refreshed, fallbackRefreshToken = refreshToken)
+        return getStoredSession()
+    }
+
+    fun saveTokenResponse(token: SpotifyTokenResponse, fallbackRefreshToken: String? = null) {
+        val refreshToken = token.refreshToken ?: fallbackRefreshToken
+        authPreferences.edit()
+            .putString(AccessTokenKey, token.accessToken)
+            .putLong(ExpiresAtKey, System.currentTimeMillis() + token.expiresIn * 1_000L)
+            .apply {
+                if (refreshToken != null) putString(RefreshTokenKey, refreshToken)
+            }
+            .apply()
+    }
+
+    fun getStoredSession(): SpotifyStoredSession? {
+        val accessToken = authPreferences.getString(AccessTokenKey, null) ?: return null
+        return SpotifyStoredSession(
+            accessToken = accessToken,
+            refreshToken = authPreferences.getString(RefreshTokenKey, null),
+            expiresAtMillis = authPreferences.getLong(ExpiresAtKey, 0L),
+        )
+    }
+
+    fun clearSession() {
+        authPreferences.edit()
+            .remove(AccessTokenKey)
+            .remove(RefreshTokenKey)
+            .remove(ExpiresAtKey)
+            .remove(PendingCodeVerifierKey)
+            .apply()
     }
 }
 
@@ -101,6 +154,14 @@ data class SpotifyTokenResponse(
     @SerialName("refresh_token") val refreshToken: String? = null,
     val scope: String? = null,
 )
+
+data class SpotifyStoredSession(
+    val accessToken: String,
+    val refreshToken: String?,
+    val expiresAtMillis: Long,
+) {
+    fun isExpiringSoon(): Boolean = System.currentTimeMillis() + ExpirySafetyWindowMillis >= expiresAtMillis
+}
 
 fun defaultSpotifyHttpClient(): HttpClient = HttpClient(io.ktor.client.engine.okhttp.OkHttp) {
     install(ContentNegotiation) {

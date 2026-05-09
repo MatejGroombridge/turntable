@@ -3,8 +3,12 @@ package dev.matejgroombridge.turntable.spotify
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.bearerAuth
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
+import io.ktor.client.request.post
+import io.ktor.client.request.put
+import io.ktor.client.request.setBody
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -32,8 +36,13 @@ class SpotifyApi(
         after?.let { parameter("after", it) }
     }.body()
 
-    suspend fun getFollowedArtistsBatch(limit: Int = 10, after: String? = null): List<SpotifyArtist> =
-        getFollowedArtists(limit = limit.coerceIn(1, 10), after = after).artists.items
+    suspend fun getFollowedArtistsBatch(limit: Int = 10, after: String? = null): SpotifyFollowedArtistsBatch {
+        val response = getFollowedArtists(limit = limit.coerceIn(1, 10), after = after)
+        return SpotifyFollowedArtistsBatch(
+            artists = response.artists.items,
+            nextAfter = response.artists.cursors?.after,
+        )
+    }
 
     suspend fun getArtistAlbums(artistId: String, limit: Int = 20, offset: Int = 0): SpotifyArtistAlbumsPage = httpClient.get("https://api.spotify.com/v1/artists/$artistId/albums") {
         bearerAuth(accessToken)
@@ -55,6 +64,55 @@ class SpotifyApi(
 
     suspend fun getAlbumTracksBatch(albumId: String): List<SpotifyTrack> =
         getAlbumTracks(albumId = albumId, limit = 50, offset = 0).items
+
+    suspend fun getAvailableDevices(): SpotifyDevicesResponse = httpClient.get("https://api.spotify.com/v1/me/player/devices") {
+        bearerAuth(accessToken)
+    }.body()
+
+    suspend fun startAlbumPlayback(albumId: String, deviceId: String? = null) {
+        putPlayerCommand("https://api.spotify.com/v1/me/player/play", deviceId) {
+            setBody(SpotifyPlaybackRequest(contextUri = "spotify:album:$albumId"))
+        }
+    }
+
+    suspend fun resumePlayback(deviceId: String? = null) {
+        putPlayerCommand("https://api.spotify.com/v1/me/player/play", deviceId)
+    }
+
+    suspend fun pausePlayback(deviceId: String? = null) {
+        putPlayerCommand("https://api.spotify.com/v1/me/player/pause", deviceId)
+    }
+
+    suspend fun skipToNext(deviceId: String? = null) {
+        postPlayerCommand("https://api.spotify.com/v1/me/player/next", deviceId)
+    }
+
+    suspend fun skipToPrevious(deviceId: String? = null) {
+        postPlayerCommand("https://api.spotify.com/v1/me/player/previous", deviceId)
+    }
+
+    suspend fun setShuffle(enabled: Boolean, deviceId: String? = null) {
+        httpClient.put("https://api.spotify.com/v1/me/player/shuffle") {
+            bearerAuth(accessToken)
+            parameter("state", enabled)
+            deviceId?.let { parameter("device_id", it) }
+        }
+    }
+
+    private suspend fun putPlayerCommand(url: String, deviceId: String?, block: io.ktor.client.request.HttpRequestBuilder.() -> Unit = {}) {
+        httpClient.put(url) {
+            bearerAuth(accessToken)
+            deviceId?.let { parameter("device_id", it) }
+            block()
+        }
+    }
+
+    private suspend fun postPlayerCommand(url: String, deviceId: String?) {
+        httpClient.post(url) {
+            bearerAuth(accessToken)
+            deviceId?.let { parameter("device_id", it) }
+        }
+    }
 }
 
 @Serializable
@@ -91,6 +149,11 @@ data class SpotifyArtistsPage(
 @Serializable
 data class SpotifyCursors(
     val after: String? = null,
+)
+
+data class SpotifyFollowedArtistsBatch(
+    val artists: List<SpotifyArtist>,
+    val nextAfter: String?,
 )
 
 @Serializable
@@ -146,4 +209,22 @@ data class SpotifyImage(
 @Serializable
 data class SpotifyFollowers(
     val total: Int = 0,
+)
+
+@Serializable
+data class SpotifyDevicesResponse(
+    val devices: List<SpotifyDevice> = emptyList(),
+)
+
+@Serializable
+data class SpotifyDevice(
+    val id: String? = null,
+    val name: String,
+    @SerialName("is_active") val isActive: Boolean = false,
+    @SerialName("is_restricted") val isRestricted: Boolean = false,
+)
+
+@Serializable
+data class SpotifyPlaybackRequest(
+    @SerialName("context_uri") val contextUri: String,
 )
