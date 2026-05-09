@@ -1,5 +1,6 @@
 package dev.matejgroombridge.turntable.spotify
 
+import android.content.Context
 import android.net.Uri
 import android.util.Base64
 import dev.matejgroombridge.turntable.BuildConfig
@@ -24,6 +25,7 @@ import kotlinx.serialization.json.Json
 private const val SpotifyAccountsHost = "accounts.spotify.com"
 private const val SpotifyAuthorizePath = "/authorize"
 private const val SpotifyTokenUrl = "https://accounts.spotify.com/api/token"
+private const val PendingCodeVerifierKey = "pending_code_verifier"
 
 private val SpotifyScopes = listOf(
     "user-library-read",
@@ -35,11 +37,12 @@ private val SpotifyScopes = listOf(
 )
 
 class SpotifyAuthManager(
+    context: Context,
     private val clientId: String = BuildConfig.SPOTIFY_CLIENT_ID,
     private val redirectUri: String = BuildConfig.SPOTIFY_REDIRECT_URI,
     private val httpClient: HttpClient = defaultSpotifyHttpClient(),
 ) {
-    private var pendingCodeVerifier: String? = null
+    private val authPreferences = context.applicationContext.getSharedPreferences("spotify_auth", Context.MODE_PRIVATE)
 
     val isConfigured: Boolean
         get() = clientId.isNotBlank()
@@ -47,7 +50,7 @@ class SpotifyAuthManager(
     fun buildAuthorizationUri(): Uri {
         check(isConfigured) { "Set SPOTIFY_CLIENT_ID in gradle.properties or the environment." }
         val verifier = generateCodeVerifier()
-        pendingCodeVerifier = verifier
+        authPreferences.edit().putString(PendingCodeVerifierKey, verifier).apply()
         val challenge = verifier.toCodeChallenge()
         return Uri.parse(
             URLBuilder(
@@ -66,8 +69,12 @@ class SpotifyAuthManager(
     }
 
     suspend fun exchangeCode(callbackUri: Uri): SpotifyTokenResponse {
+        callbackUri.getQueryParameter("error")?.let { error ->
+            error("Spotify authorization failed: $error")
+        }
         val code = callbackUri.getQueryParameter("code") ?: error("Spotify callback did not include an authorization code.")
-        val verifier = pendingCodeVerifier ?: error("No pending Spotify sign-in was found.")
+        val verifier = authPreferences.getString(PendingCodeVerifierKey, null)
+            ?: error("No pending Spotify sign-in was found. Try connecting Spotify again.")
         return httpClient.post(SpotifyTokenUrl) {
             setBody(
                 FormDataContent(
@@ -81,7 +88,7 @@ class SpotifyAuthManager(
                 ),
             )
         }.body<SpotifyTokenResponse>().also {
-            pendingCodeVerifier = null
+            authPreferences.edit().remove(PendingCodeVerifierKey).apply()
         }
     }
 }

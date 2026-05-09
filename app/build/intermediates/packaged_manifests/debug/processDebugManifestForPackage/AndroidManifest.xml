@@ -37,6 +37,7 @@
         <activity
             android:name="dev.matejgroombridge.turntable.MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.App.Main" >
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -79,10 +79,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import coil.compose.rememberAsyncImagePainter
+import dev.matejgroombridge.turntable.spotify.SpotifyAlbum
 import dev.matejgroombridge.turntable.spotify.SpotifyApi
 import dev.matejgroombridge.turntable.spotify.SpotifyArtist
 import dev.matejgroombridge.turntable.spotify.SpotifyAuthManager
-import dev.matejgroombridge.turntable.spotify.SpotifySavedAlbum
+import dev.matejgroombridge.turntable.spotify.SpotifyTrack
 import dev.matejgroombridge.turntable.ui.theme.AppTheme
 import dev.matejgroombridge.turntable.ui.theme.ThemeMode
 import kotlinx.coroutines.launch
@@ -91,6 +92,7 @@ private val ScreenPadding = 20.dp
 private val CardRadius = 20.dp
 private val SmallRadius = 14.dp
 private val SettingsRowMinHeight = 56.dp
+private const val SpotifyBatchSize = 10
 
 class MainActivity : ComponentActivity() {
     private val spotifyCallbackUri = mutableStateOf<Uri?>(null)
@@ -145,6 +147,7 @@ private data class TurntableArtist(
     val savedLabel: String,
     val monthlyListeners: String,
     val albums: List<TurntableAlbum>,
+    val albumsLoaded: Boolean = true,
 )
 
 private data class TurntableAlbum(
@@ -156,6 +159,7 @@ private data class TurntableAlbum(
     val imageSeed: List<Color>,
     val imageUrl: String? = null,
     val tracks: List<String>,
+    val tracksLoaded: Boolean = true,
 )
 
 private data class NowPlaying(
@@ -174,6 +178,12 @@ private data class SpotifySessionSummary(
 private data class TurntableLibrary(
     val artists: List<TurntableArtist>,
     val albums: List<TurntableAlbum>,
+)
+
+private data class SpotifySyncResult(
+    val library: TurntableLibrary,
+    val summary: SpotifySessionSummary,
+    val savedAlbumCount: Int,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -197,13 +207,14 @@ private fun TurntableApp(
     val activeLibrary = spotifyLibrary ?: sampleLibrary
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val spotifyAuthManager = remember { SpotifyAuthManager() }
+    val spotifyAuthManager = remember(context) { SpotifyAuthManager(context) }
     var screen: Screen by remember { mutableStateOf(Screen.Home) }
     var spotifyAccessToken by remember { mutableStateOf<String?>(null) }
     var spotifySessionSummary by remember { mutableStateOf<SpotifySessionSummary?>(null) }
     var spotifyStatusMessage by remember { mutableStateOf<String?>(null) }
     var isSpotifyLoading by remember { mutableStateOf(false) }
     val isSignedIn = spotifyAccessToken != null
+    var isShuffleEnabled by remember { mutableStateOf(false) }
     var nowPlaying by remember {
         mutableStateOf(
             NowPlaying(
@@ -218,6 +229,96 @@ private fun TurntableApp(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val previousContentScreen = remember { mutableStateOf<Screen>(Screen.Home) }
 
+    fun playAlbum(album: TurntableAlbum, shuffled: Boolean = isShuffleEnabled) {
+        isShuffleEnabled = shuffled
+        nowPlaying = NowPlaying(
+            album = album,
+            track = if (shuffled) album.tracks.shuffled().first() else album.tracks.first(),
+            isPlaying = true,
+            isLiked = nowPlaying.album.id == album.id && nowPlaying.isLiked,
+        )
+    }
+
+    fun updateAlbumInLibrary(updatedAlbum: TurntableAlbum) {
+        spotifyLibrary = spotifyLibrary?.let { library ->
+            library.copy(
+                albums = library.albums.map { if (it.id == updatedAlbum.id) updatedAlbum else it },
+                artists = library.artists.map { artist ->
+                    artist.copy(albums = artist.albums.map { if (it.id == updatedAlbum.id) updatedAlbum else it })
+                },
+            )
+        }
+        if (nowPlaying.album.id == updatedAlbum.id) {
+            nowPlaying = nowPlaying.copy(album = updatedAlbum)
+        }
+        screen = Screen.Album(updatedAlbum)
+    }
+
+    fun updateArtistInLibrary(updatedArtist: TurntableArtist, additionalAlbums: List<TurntableAlbum>) {
+        spotifyLibrary = spotifyLibrary?.let { library ->
+            library.copy(
+                artists = library.artists.map { if (it.id == updatedArtist.id) updatedArtist else it },
+                albums = (library.albums + additionalAlbums).distinctBy { it.id },
+            )
+        }
+        screen = Screen.Artist(updatedArtist)
+    }
+
+    fun loadAlbumTracks(album: TurntableAlbum) {
+        val accessToken = spotifyAccessToken
+        if (accessToken == null || album.tracksLoaded || album.id.startsWith("sample-")) {
+            screen = Screen.Album(album)
+            return
+        }
+        screen = Screen.Album(album)
+        coroutineScope.launch {
+            spotifyStatusMessage = "Loading ${album.name} tracks…"
+            runCatching {
+                val api = SpotifyApi(accessToken)
+                val tracks = api.getAlbumTracksBatch(album.id)
+                album.copy(
+                    tracks = tracks
+                        .sortedWith(compareBy<SpotifyTrack> { it.trackNumber }.thenBy { it.name })
+                        .map { it.name }
+                        .ifEmpty { album.tracks },
+                    tracksLoaded = true,
+                )
+            }.onSuccess { updatedAlbum ->
+                updateAlbumInLibrary(updatedAlbum)
+                spotifyStatusMessage = "Loaded ${updatedAlbum.name}"
+            }.onFailure { throwable ->
+                spotifyStatusMessage = throwable.message ?: "Could not load album tracks."
+            }
+        }
+    }
+
+    fun loadArtistAlbums(artist: TurntableArtist) {
+        val accessToken = spotifyAccessToken
+        if (accessToken == null || artist.albumsLoaded || artist.id.startsWith("sample-")) {
+            screen = Screen.Artist(artist)
+            return
+        }
+        screen = Screen.Artist(artist)
+        coroutineScope.launch {
+            spotifyStatusMessage = "Loading ${artist.name} albums…"
+            runCatching {
+                val api = SpotifyApi(accessToken)
+                val albums = api.getArtistAlbumsBatch(artist.id, limit = SpotifyBatchSize).mapIndexed { index, album ->
+                    album.toTurntableAlbum(index = activeLibrary.albums.size + index, tracks = emptyList(), tracksLoaded = false)
+                }
+                artist.copy(
+                    albums = albums.ifEmpty { artist.albums },
+                    albumsLoaded = true,
+                ) to albums
+            }.onSuccess { (updatedArtist, albums) ->
+                updateArtistInLibrary(updatedArtist, albums)
+                spotifyStatusMessage = "Loaded ${updatedArtist.name} albums"
+            }.onFailure { throwable ->
+                spotifyStatusMessage = throwable.message ?: "Could not load artist albums."
+            }
+        }
+    }
+
     fun loadSpotifySummary(accessToken: String) {
         coroutineScope.launch {
             isSpotifyLoading = true
@@ -225,23 +326,33 @@ private fun TurntableApp(
             runCatching {
                 val api = SpotifyApi(accessToken)
                 val profile = api.getCurrentUserProfile()
-                val albumsPage = api.getSavedAlbums(limit = 50)
-                val artistsPage = api.getFollowedArtists(limit = 50)
-                val syncedAlbums = albumsPage.items.toTurntableAlbums()
-                val syncedArtists = artistsPage.artists.items.toTurntableArtists(syncedAlbums)
+                val savedAlbums = api.getSavedAlbumsBatch(limit = SpotifyBatchSize)
+                val followedArtists = api.getFollowedArtistsBatch(limit = SpotifyBatchSize)
+                val syncedAlbums = savedAlbums.mapIndexed { index, savedAlbum ->
+                    savedAlbum.album.toTurntableAlbum(index = index, tracks = emptyList(), tracksLoaded = false)
+                }
+                val syncedArtists = followedArtists.toTurntableArtists(
+                    albumsByArtistId = emptyMap(),
+                    savedAlbums = syncedAlbums,
+                    albumsLoaded = false,
+                )
                 val syncedLibrary = TurntableLibrary(
                     artists = syncedArtists,
                     albums = syncedAlbums,
                 )
-                syncedLibrary to SpotifySessionSummary(
-                    displayName = profile.displayName ?: profile.id,
-                    albumCount = syncedAlbums.size,
-                    artistCount = syncedArtists.size,
+                SpotifySyncResult(
+                    library = syncedLibrary,
+                    summary = SpotifySessionSummary(
+                        displayName = profile.displayName ?: profile.id,
+                        albumCount = syncedAlbums.size,
+                        artistCount = syncedArtists.size,
+                    ),
+                    savedAlbumCount = syncedAlbums.size,
                 )
-            }.onSuccess { (syncedLibrary, summary) ->
-                spotifyLibrary = syncedLibrary
-                spotifySessionSummary = summary
-                syncedLibrary.albums.firstOrNull()?.let { album ->
+            }.onSuccess { result ->
+                spotifyLibrary = result.library
+                spotifySessionSummary = result.summary
+                result.library.albums.firstOrNull()?.let { album ->
                     nowPlaying = NowPlaying(
                         album = album,
                         track = album.tracks.first(),
@@ -249,7 +360,7 @@ private fun TurntableApp(
                         isLiked = false,
                     )
                 }
-                spotifyStatusMessage = "Connected as ${summary.displayName}"
+                spotifyStatusMessage = "Connected as ${result.summary.displayName}"
                 screen = Screen.Home
             }.onFailure { throwable ->
                 spotifyStatusMessage = throwable.message ?: "Spotify sync failed."
@@ -269,8 +380,10 @@ private fun TurntableApp(
                     loadSpotifySummary(token.accessToken)
                 }
                 .onFailure { throwable ->
+                    spotifyAccessToken = null
                     spotifyStatusMessage = throwable.message ?: "Spotify sign in failed."
                     isSpotifyLoading = false
+                    screen = Screen.SignIn
                 }
             onSpotifyCallbackConsumed()
         }
@@ -281,9 +394,11 @@ private fun TurntableApp(
             if (screen !is Screen.SignIn && screen !is Screen.Settings) {
                 PlaybackBar(
                     nowPlaying = nowPlaying,
+                    isShuffleEnabled = isShuffleEnabled,
                     onClick = { showPlayer = true },
                     onTogglePlay = { nowPlaying = nowPlaying.copy(isPlaying = !nowPlaying.isPlaying) },
-                    onSkip = { nowPlaying = nowPlaying.nextTrack() },
+                    onToggleShuffle = { isShuffleEnabled = !isShuffleEnabled },
+                    onSkip = { nowPlaying = nowPlaying.nextTrack(shuffled = isShuffleEnabled) },
                     onReplay = { nowPlaying = nowPlaying.previousTrack() },
                 )
             }
@@ -296,11 +411,11 @@ private fun TurntableApp(
         ) {
             when (val current = screen) {
                 Screen.Home -> HomeScreen(
-                    artists = activeLibrary.artists,
-                    albums = activeLibrary.albums,
+                    artists = activeLibrary.artists.take(SpotifyBatchSize),
+                    albums = activeLibrary.albums.take(SpotifyBatchSize),
                     isSignedIn = isSignedIn,
-                    onOpenArtist = { screen = Screen.Artist(it) },
-                    onOpenAlbum = { screen = Screen.Album(it) },
+                    onOpenArtist = { loadArtistAlbums(it) },
+                    onOpenAlbum = { loadAlbumTracks(it) },
                     onOpenSettings = {
                         previousContentScreen.value = screen
                         screen = Screen.Settings
@@ -312,15 +427,10 @@ private fun TurntableApp(
                     artist = current.artist,
                     isSignedIn = isSignedIn,
                     onBack = { screen = Screen.Home },
-                    onOpenAlbum = { screen = Screen.Album(it) },
+                    onOpenAlbum = { loadAlbumTracks(it) },
+                    isShuffleEnabled = isShuffleEnabled,
                     onPlayArtist = {
-                        val album = current.artist.albums.first()
-                        nowPlaying = NowPlaying(
-                            album = album,
-                            track = "This is ${current.artist.name}",
-                            isPlaying = true,
-                            isLiked = false,
-                        )
+                        current.artist.albums.firstOrNull()?.let { album -> playAlbum(album, shuffled = true) }
                     },
                     onOpenSettings = {
                         previousContentScreen.value = screen
@@ -332,15 +442,11 @@ private fun TurntableApp(
                 is Screen.Album -> AlbumScreen(
                     album = current.album,
                     isSignedIn = isSignedIn,
+                    isLoadingTracks = isSignedIn && !current.album.tracksLoaded,
                     onBack = { screen = Screen.Home },
-                    onPlayTrack = { track ->
-                        nowPlaying = NowPlaying(
-                            album = current.album,
-                            track = track,
-                            isPlaying = true,
-                            isLiked = false,
-                        )
-                    },
+                    onPlayAlbum = { playAlbum(current.album, shuffled = false) },
+                    onToggleAlbumShuffle = { playAlbum(current.album, shuffled = !isShuffleEnabled) },
+                    isShuffleEnabled = isShuffleEnabled,
                     onOpenSettings = {
                         previousContentScreen.value = screen
                         screen = Screen.Settings
@@ -368,6 +474,7 @@ private fun TurntableApp(
                             spotifyStatusMessage = "Set SPOTIFY_CLIENT_ID before connecting Spotify."
                             return@SignInScreen
                         }
+                        spotifyStatusMessage = "Opening Spotify sign in…"
                         runCatching { spotifyAuthManager.buildAuthorizationUri() }
                             .onSuccess { authUri -> context.startActivity(Intent(Intent.ACTION_VIEW, authUri)) }
                             .onFailure { throwable -> spotifyStatusMessage = throwable.message ?: "Could not start Spotify sign in." }
@@ -384,9 +491,11 @@ private fun TurntableApp(
         ) {
             FullPlayer(
                 nowPlaying = nowPlaying,
+                isShuffleEnabled = isShuffleEnabled,
                 onTogglePlay = { nowPlaying = nowPlaying.copy(isPlaying = !nowPlaying.isPlaying) },
                 onToggleLike = { nowPlaying = nowPlaying.copy(isLiked = !nowPlaying.isLiked) },
-                onSkip = { nowPlaying = nowPlaying.nextTrack() },
+                onToggleShuffle = { isShuffleEnabled = !isShuffleEnabled },
+                onSkip = { nowPlaying = nowPlaying.nextTrack(shuffled = isShuffleEnabled) },
                 onReplay = { nowPlaying = nowPlaying.previousTrack() },
             )
         }
@@ -438,6 +547,7 @@ private fun HomeScreen(
 private fun ArtistScreen(
     artist: TurntableArtist,
     isSignedIn: Boolean,
+    isShuffleEnabled: Boolean,
     onBack: () -> Unit,
     onOpenAlbum: (TurntableAlbum) -> Unit,
     onPlayArtist: () -> Unit,
@@ -471,11 +581,11 @@ private fun ArtistScreen(
                 Button(onClick = onPlayArtist) {
                     Icon(Icons.Rounded.Shuffle, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Play This is ${artist.name}")
+                    Text(if (isShuffleEnabled) "Shuffle ${artist.name}" else "Play ${artist.name}")
                 }
             }
         }
-        item { SectionTitle("Albums") }
+        item { SectionTitle(if (isSignedIn && !artist.albumsLoaded) "Loading albums…" else "Albums") }
         items(artist.albums) { album ->
             AlbumListRow(album = album, onClick = { onOpenAlbum(album) })
         }
@@ -486,8 +596,11 @@ private fun ArtistScreen(
 private fun AlbumScreen(
     album: TurntableAlbum,
     isSignedIn: Boolean,
+    isLoadingTracks: Boolean,
+    isShuffleEnabled: Boolean,
     onBack: () -> Unit,
-    onPlayTrack: (String) -> Unit,
+    onPlayAlbum: () -> Unit,
+    onToggleAlbumShuffle: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenUser: () -> Unit,
 ) {
@@ -516,14 +629,28 @@ private fun AlbumScreen(
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = onPlayAlbum) {
+                        Icon(Icons.Rounded.PlayArrow, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Play album")
+                    }
+                    TextButton(onClick = onToggleAlbumShuffle) {
+                        Icon(Icons.Rounded.Shuffle, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (isShuffleEnabled) "Unshuffle" else "Shuffle")
+                    }
+                }
             }
         }
-        item { SectionTitle("Tracks") }
+        item {
+            SectionTitle(if (isLoadingTracks) "Loading tracks…" else "Tracks")
+        }
         items(album.tracks) { track ->
             TrackRow(
                 index = album.tracks.indexOf(track) + 1,
                 title = track,
-                onClick = { onPlayTrack(track) },
             )
         }
     }
@@ -885,9 +1012,8 @@ private fun AlbumListRow(album: TurntableAlbum, onClick: () -> Unit) {
 }
 
 @Composable
-private fun TrackRow(index: Int, title: String, onClick: () -> Unit) {
+private fun TrackRow(index: Int, title: String) {
     Surface(
-        onClick = onClick,
         shape = RoundedCornerShape(SmallRadius),
         color = Color.Transparent,
         modifier = Modifier.fillMaxWidth(),
@@ -908,8 +1034,10 @@ private fun TrackRow(index: Int, title: String, onClick: () -> Unit) {
 @Composable
 private fun PlaybackBar(
     nowPlaying: NowPlaying,
+    isShuffleEnabled: Boolean,
     onClick: () -> Unit,
     onTogglePlay: () -> Unit,
+    onToggleShuffle: () -> Unit,
     onSkip: () -> Unit,
     onReplay: () -> Unit,
 ) {
@@ -940,6 +1068,7 @@ private fun PlaybackBar(
                     Text(nowPlaying.album.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 PlaybackIconButton(Icons.Rounded.Replay, "Replay", onReplay)
+                PlaybackIconButton(Icons.Rounded.Shuffle, if (isShuffleEnabled) "Unshuffle" else "Shuffle", onToggleShuffle, selected = isShuffleEnabled)
                 PlaybackIconButton(if (nowPlaying.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Play or pause", onTogglePlay)
                 PlaybackIconButton(Icons.Rounded.SkipNext, "Skip", onSkip)
             }
@@ -950,8 +1079,10 @@ private fun PlaybackBar(
 @Composable
 private fun FullPlayer(
     nowPlaying: NowPlaying,
+    isShuffleEnabled: Boolean,
     onTogglePlay: () -> Unit,
     onToggleLike: () -> Unit,
+    onToggleShuffle: () -> Unit,
     onSkip: () -> Unit,
     onReplay: () -> Unit,
 ) {
@@ -968,6 +1099,7 @@ private fun FullPlayer(
         Spacer(Modifier.height(26.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.CenterVertically) {
             PlaybackIconButton(Icons.Rounded.SkipPrevious, "Previous", onReplay)
+            PlaybackIconButton(Icons.Rounded.Shuffle, if (isShuffleEnabled) "Unshuffle" else "Shuffle", onToggleShuffle, selected = isShuffleEnabled)
             PlaybackIconButton(if (nowPlaying.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Play or pause", onTogglePlay)
             PlaybackIconButton(Icons.Rounded.SkipNext, "Next", onSkip)
             PlaybackIconButton(if (nowPlaying.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, "Like", onToggleLike)
@@ -976,9 +1108,18 @@ private fun FullPlayer(
 }
 
 @Composable
-private fun PlaybackIconButton(icon: ImageVector, contentDescription: String, onClick: () -> Unit) {
+private fun PlaybackIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    selected: Boolean = false,
+) {
     IconButton(onClick = onClick) {
-        Icon(icon, contentDescription = contentDescription)
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 
@@ -1005,9 +1146,13 @@ private fun ArtBlock(
     }
 }
 
-private fun NowPlaying.nextTrack(): NowPlaying {
-    val index = album.tracks.indexOf(track).takeIf { it >= 0 } ?: -1
-    val next = album.tracks[(index + 1).floorMod(album.tracks.size)]
+private fun NowPlaying.nextTrack(shuffled: Boolean): NowPlaying {
+    val next = if (shuffled) {
+        album.tracks.filterNot { it == track }.randomOrNull() ?: track
+    } else {
+        val index = album.tracks.indexOf(track).takeIf { it >= 0 } ?: -1
+        album.tracks[(index + 1).floorMod(album.tracks.size)]
+    }
     return copy(track = next, isPlaying = true)
 }
 
@@ -1019,42 +1164,54 @@ private fun NowPlaying.previousTrack(): NowPlaying {
 
 private fun Int.floorMod(other: Int): Int = ((this % other) + other) % other
 
-private fun List<SpotifySavedAlbum>.toTurntableAlbums(): List<TurntableAlbum> = mapIndexed { index, savedAlbum ->
-    val spotifyAlbum = savedAlbum.album
-    TurntableAlbum(
-        id = spotifyAlbum.id,
-        name = spotifyAlbum.name,
-        artist = spotifyAlbum.artists.joinToString(", ") { it.name }.ifBlank { "Unknown artist" },
-        year = spotifyAlbum.releaseDate.take(4).toIntOrNull() ?: 0,
-        runtime = "${spotifyAlbum.totalTracks} tracks",
-        imageSeed = paletteFor(index),
-        imageUrl = spotifyAlbum.images.firstOrNull()?.url,
-        tracks = listOf("Open ${spotifyAlbum.name} in Spotify"),
-    )
-}
+private fun SpotifyAlbum.toTurntableAlbum(
+    index: Int,
+    tracks: List<SpotifyTrack> = emptyList(),
+    tracksLoaded: Boolean = tracks.isNotEmpty(),
+): TurntableAlbum = TurntableAlbum(
+    id = id,
+    name = name,
+    artist = artists.joinToString(", ") { it.name }.ifBlank { "Unknown artist" },
+    year = releaseDate.take(4).toIntOrNull() ?: 0,
+    runtime = "${totalTracks} tracks",
+    imageSeed = paletteFor(index),
+    imageUrl = images.firstOrNull()?.url,
+    tracks = tracks
+        .sortedWith(compareBy<SpotifyTrack> { it.trackNumber }.thenBy { it.name })
+        .map { it.name }
+        .ifEmpty { List(totalTracks.coerceAtLeast(1)) { trackIndex -> "Track ${trackIndex + 1}" } },
+    tracksLoaded = tracksLoaded,
+)
 
-private fun List<SpotifyArtist>.toTurntableArtists(albums: List<TurntableAlbum>): List<TurntableArtist> = mapIndexed { index, artist ->
+private fun List<SpotifyArtist>.toTurntableArtists(
+    albumsByArtistId: Map<String, List<TurntableAlbum>>,
+    savedAlbums: List<TurntableAlbum>,
+    albumsLoaded: Boolean = true,
+): List<TurntableArtist> = mapIndexed { index, artist ->
     TurntableArtist(
         id = artist.id,
         name = artist.name,
-        imageSeed = paletteFor(index + albums.size),
+        imageSeed = paletteFor(index + savedAlbums.size),
         imageUrl = artist.images.firstOrNull()?.url,
         savedLabel = "Followed on Spotify",
         monthlyListeners = artist.followers?.total?.let { "${it.formatCompact()} followers" } ?: "Spotify artist",
-        albums = albums.filter { album -> album.artist.split(", ").any { it == artist.name } }.ifEmpty {
-            listOf(
-                TurntableAlbum(
-                    id = "${artist.id}-spotify-profile",
-                    name = "This is ${artist.name}",
-                    artist = artist.name,
-                    year = 0,
-                    runtime = "Spotify playlist",
-                    imageSeed = paletteFor(index + albums.size),
-                    imageUrl = artist.images.firstOrNull()?.url,
-                    tracks = listOf("Open This is ${artist.name} in Spotify"),
-                ),
-            )
-        },
+        albums = albumsByArtistId[artist.id]
+            ?: savedAlbums.filter { album -> album.artist.split(", ").any { it == artist.name } }
+            .ifEmpty {
+                listOf(
+                    TurntableAlbum(
+                        id = "${artist.id}-spotify-profile",
+                        name = "This is ${artist.name}",
+                        artist = artist.name,
+                        year = 0,
+                        runtime = "Spotify playlist",
+                        imageSeed = paletteFor(index + savedAlbums.size),
+                        imageUrl = artist.images.firstOrNull()?.url,
+                        tracks = listOf("Open This is ${artist.name} in Spotify"),
+                    ),
+                )
+            },
+        albumsLoaded = albumsLoaded,
     )
 }
 
