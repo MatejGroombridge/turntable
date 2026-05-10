@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v1.0.0 — 2026-05-10
+
+Randomisation, search, complete UI and functionality
+
+
 ## v0.3.0 — 2026-05-09
 
 UI improvements + Load more function
