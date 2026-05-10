@@ -3,6 +3,7 @@ package dev.matejgroombridge.turntable.spotify
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.bearerAuth
+import io.ktor.client.statement.bodyAsText
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
@@ -44,6 +45,10 @@ class SpotifyApi(
         )
     }
 
+    suspend fun getArtist(artistId: String): SpotifyArtist = httpClient.get("https://api.spotify.com/v1/artists/$artistId") {
+        bearerAuth(accessToken)
+    }.body()
+
     suspend fun getArtistAlbums(artistId: String, limit: Int = 20, offset: Int = 0): SpotifyArtistAlbumsPage = httpClient.get("https://api.spotify.com/v1/artists/$artistId/albums") {
         bearerAuth(accessToken)
         parameter("include_groups", "album,single")
@@ -65,6 +70,30 @@ class SpotifyApi(
     suspend fun getAlbumTracksBatch(albumId: String): List<SpotifyTrack> =
         getAlbumTracks(albumId = albumId, limit = 50, offset = 0).items
 
+    suspend fun getCurrentPlayback(): SpotifyPlaybackState? = getNullablePlayback("https://api.spotify.com/v1/me/player")
+
+    suspend fun getCurrentlyPlaying(): SpotifyPlaybackState? = getNullablePlayback("https://api.spotify.com/v1/me/player/currently-playing")
+
+    private suspend fun getNullablePlayback(url: String): SpotifyPlaybackState? {
+        val response = httpClient.get(url) {
+            bearerAuth(accessToken)
+        }
+        val body = response.bodyAsText()
+        return body.takeIf { it.isNotBlank() }?.let { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString<SpotifyPlaybackState>(it) }
+    }
+
+    suspend fun getRecentlyPlayed(limit: Int = 20): SpotifyRecentlyPlayedResponse = httpClient.get("https://api.spotify.com/v1/me/player/recently-played") {
+        bearerAuth(accessToken)
+        parameter("limit", limit.coerceIn(1, 50))
+    }.body()
+
+    suspend fun search(query: String, limit: Int = 10): SpotifySearchResponse = httpClient.get("https://api.spotify.com/v1/search") {
+        bearerAuth(accessToken)
+        parameter("q", query)
+        parameter("type", "artist,album,track")
+        parameter("limit", limit.coerceIn(1, 20))
+    }.body()
+
     suspend fun getAvailableDevices(): SpotifyDevicesResponse = httpClient.get("https://api.spotify.com/v1/me/player/devices") {
         bearerAuth(accessToken)
     }.body()
@@ -72,6 +101,12 @@ class SpotifyApi(
     suspend fun startAlbumPlayback(albumId: String, deviceId: String? = null) {
         putPlayerCommand("https://api.spotify.com/v1/me/player/play", deviceId) {
             setBody(SpotifyPlaybackRequest(contextUri = "spotify:album:$albumId"))
+        }
+    }
+
+    suspend fun startTrackPlayback(trackUri: String, deviceId: String? = null) {
+        putPlayerCommand("https://api.spotify.com/v1/me/player/play", deviceId) {
+            setBody(SpotifyTrackPlaybackRequest(uris = listOf(trackUri)))
         }
     }
 
@@ -89,6 +124,36 @@ class SpotifyApi(
 
     suspend fun skipToPrevious(deviceId: String? = null) {
         postPlayerCommand("https://api.spotify.com/v1/me/player/previous", deviceId)
+    }
+
+    suspend fun saveAlbum(albumId: String) {
+        httpClient.put("https://api.spotify.com/v1/me/albums") {
+            bearerAuth(accessToken)
+            parameter("ids", albumId)
+        }
+    }
+
+    suspend fun removeSavedAlbum(albumId: String) {
+        httpClient.delete("https://api.spotify.com/v1/me/albums") {
+            bearerAuth(accessToken)
+            parameter("ids", albumId)
+        }
+    }
+
+    suspend fun followArtist(artistId: String) {
+        httpClient.put("https://api.spotify.com/v1/me/following") {
+            bearerAuth(accessToken)
+            parameter("type", "artist")
+            parameter("ids", artistId)
+        }
+    }
+
+    suspend fun unfollowArtist(artistId: String) {
+        httpClient.delete("https://api.spotify.com/v1/me/following") {
+            bearerAuth(accessToken)
+            parameter("type", "artist")
+            parameter("ids", artistId)
+        }
     }
 
     suspend fun setShuffle(enabled: Boolean, deviceId: String? = null) {
@@ -182,7 +247,10 @@ data class SpotifyAlbum(
 data class SpotifyTrack(
     val id: String? = null,
     val name: String,
+    val uri: String? = null,
     @SerialName("track_number") val trackNumber: Int = 0,
+    val album: SpotifyAlbum? = null,
+    val artists: List<SpotifySimpleArtist> = emptyList(),
 )
 
 @Serializable
@@ -212,6 +280,41 @@ data class SpotifyFollowers(
 )
 
 @Serializable
+data class SpotifyPlaybackState(
+    @SerialName("is_playing") val isPlaying: Boolean = false,
+    @SerialName("shuffle_state") val shuffleState: Boolean = false,
+    val item: SpotifyTrack? = null,
+)
+
+@Serializable
+data class SpotifyRecentlyPlayedResponse(
+    val items: List<SpotifyRecentlyPlayedItem> = emptyList(),
+)
+
+@Serializable
+data class SpotifyRecentlyPlayedItem(
+    val track: SpotifyTrack,
+    @SerialName("played_at") val playedAt: String,
+)
+
+@Serializable
+data class SpotifySearchResponse(
+    val artists: SpotifyArtistsPage = SpotifyArtistsPage(),
+    val albums: SpotifySearchAlbumsPage = SpotifySearchAlbumsPage(),
+    val tracks: SpotifySearchTracksPage = SpotifySearchTracksPage(),
+)
+
+@Serializable
+data class SpotifySearchAlbumsPage(
+    val items: List<SpotifyAlbum> = emptyList(),
+)
+
+@Serializable
+data class SpotifySearchTracksPage(
+    val items: List<SpotifyTrack> = emptyList(),
+)
+
+@Serializable
 data class SpotifyDevicesResponse(
     val devices: List<SpotifyDevice> = emptyList(),
 )
@@ -227,4 +330,9 @@ data class SpotifyDevice(
 @Serializable
 data class SpotifyPlaybackRequest(
     @SerialName("context_uri") val contextUri: String,
+)
+
+@Serializable
+data class SpotifyTrackPlaybackRequest(
+    val uris: List<String>,
 )

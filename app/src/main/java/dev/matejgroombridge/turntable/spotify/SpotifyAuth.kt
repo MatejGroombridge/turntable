@@ -29,14 +29,19 @@ private const val PendingCodeVerifierKey = "pending_code_verifier"
 private const val AccessTokenKey = "access_token"
 private const val RefreshTokenKey = "refresh_token"
 private const val ExpiresAtKey = "expires_at"
+private const val ScopeKey = "scope"
 private const val ExpirySafetyWindowMillis = 60_000L
 
 private val SpotifyScopes = listOf(
     "user-library-read",
+    "user-library-modify",
     "user-follow-read",
+    "user-follow-modify",
     "user-read-private",
     "user-read-email",
     "user-read-playback-state",
+    "user-read-currently-playing",
+    "user-read-recently-played",
     "user-modify-playback-state",
 )
 
@@ -120,6 +125,7 @@ class SpotifyAuthManager(
         val refreshToken = token.refreshToken ?: fallbackRefreshToken
         authPreferences.edit()
             .putString(AccessTokenKey, token.accessToken)
+            .putString(ScopeKey, token.scope ?: SpotifyScopes.joinToString(" "))
             .putLong(ExpiresAtKey, System.currentTimeMillis() + token.expiresIn * 1_000L)
             .apply {
                 if (refreshToken != null) putString(RefreshTokenKey, refreshToken)
@@ -129,6 +135,11 @@ class SpotifyAuthManager(
 
     fun getStoredSession(): SpotifyStoredSession? {
         val accessToken = authPreferences.getString(AccessTokenKey, null) ?: return null
+        val storedScopes = authPreferences.getString(ScopeKey, null)?.split(" ").orEmpty().toSet()
+        if (!storedScopes.containsAll(SpotifyScopes)) {
+            clearSession()
+            return null
+        }
         return SpotifyStoredSession(
             accessToken = accessToken,
             refreshToken = authPreferences.getString(RefreshTokenKey, null),
@@ -141,6 +152,7 @@ class SpotifyAuthManager(
             .remove(AccessTokenKey)
             .remove(RefreshTokenKey)
             .remove(ExpiresAtKey)
+            .remove(ScopeKey)
             .remove(PendingCodeVerifierKey)
             .apply()
     }
